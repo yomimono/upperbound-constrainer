@@ -26,6 +26,13 @@ let find_mirage file =
       )
     ]
   )
+  | Option (pos, (String (p, name)), (Prefix_relop (a, b, c))::_) ->
+    Option (pos, (String (p, name)), [ Logop (p, `And, Prefix_relop (a, b, c),
+      Prefix_relop (pos, `Lt,
+        (String (pos, upperbound))
+      )
+    )]
+    )
   | other -> other
   in
   let any ~str = function
