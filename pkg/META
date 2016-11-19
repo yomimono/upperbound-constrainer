@@ -1,0 +1,7 @@
+description = "add upper bound constraints to dependencies in opam files"
+version = "%%VERSION_NUM%%"
+requires = "opam-file-format cmdliner"
+archive(byte) = "upperbound-constrainer.cma"
+archive(native) = "upperbound-constrainer.cmxa"
+plugin(byte) = "upperbound-constrainer.cma"
+plugin(native) = "upperbound-constrainer.cmxs"
