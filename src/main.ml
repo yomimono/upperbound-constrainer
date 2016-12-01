@@ -75,7 +75,6 @@ let () =
     match !acted with
     | true ->
       (* overwrite previous contents *)
-      Format.printf "writing to %s: %s\n" file.file_name @@ OpamPrinter.opamfile file;
       let fd = Unix.(openfile file.file_name [O_WRONLY; O_TRUNC] 0o755) in
       let ch = Unix.out_channel_of_descr fd in
       set_binary_mode_out ch false;
@@ -83,6 +82,6 @@ let () =
       Format.(fprintf fmt "%s\n" @@ OpamPrinter.opamfile file);
       flush ch;
       Unix.close fd
-    | false -> Format.eprintf "no action taken"; exit 1
+    | false -> exit 1
   end
   | _ -> exit 1
