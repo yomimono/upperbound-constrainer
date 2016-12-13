@@ -31,7 +31,18 @@ let find_mirage lower file version packages =
   | false -> has_upper_bound x
   | true  -> has_lower_bound x
   in
-  let add_bound name op = Atom (name, Atom (Constraint (op, FString version))) in
+  let rec remove_bounds = function
+  | Empty | Atom (Constraint _) -> Empty
+  | Block b -> (match remove_bounds b with Empty -> Empty | b -> Block b)
+  | And (x, y) -> OpamFormula.ands [remove_bounds x; remove_bounds y]
+  | Or (x, y)  -> OpamFormula.ors  [remove_bounds x; remove_bounds y]
+  | Atom (Filter _) as a -> a
+  in
+  let add_bound name op constraints =
+    let constraints = remove_bounds constraints in
+    let atom = Atom (Constraint (op, FString version)) in
+    Atom (name, OpamFormula.ands [constraints; atom])
+  in
   let relop_of_bound = function
   | false -> `Lt
   | true  -> `Geq
@@ -40,13 +51,13 @@ let find_mirage lower file version packages =
   (* Strings have no constraints on the dependency at all, so the name
      need only match *)
   | Atom (name, Empty) when List.mem name packages ->
-      add_bound name (relop_of_bound lower)
+      add_bound name (relop_of_bound lower) Empty
 
   (* if the name matches, add an upper bound if there isn't one already *)
   | Atom (name, ops) as l when List.mem name packages && has_bound ~lower ops ->
       l
-  | Atom (name, _) when List.mem name packages ->
-      add_bound name (relop_of_bound lower)
+  | Atom (name, constraints) when List.mem name packages ->
+      add_bound name (relop_of_bound lower) constraints
 
   (* leave other nodes alone *)
   | Atom _
