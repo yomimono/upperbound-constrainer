@@ -5,19 +5,19 @@ let acted = ref false
 
 let find_mirage lower file version packages =
   let packages = List.map OpamPackage.Name.of_string packages in
-  let has_upper_bound constraints =
+  let depends_has_upper_bound constraints =
     (* TODO: the actual rules of these constraints are potentially complex;
      * is there a way to evaluate them rather than checking them in text? *)
     let rec aux = function
-      | Empty -> false
-      | Atom (Constraint ((`Lt|`Leq|`Eq), _))  -> true
-      | Block b -> aux b
-      | And (x, y) | Or (x, y) -> aux x || aux y
-      | _ -> false
+    | Empty -> false
+    | Atom (Constraint ((`Lt|`Leq|`Eq), _))  -> true
+    | Block b -> aux b
+    | And (x, y) | Or (x, y) -> aux x || aux y
+    | _ -> false
     in
     aux constraints
   in
-  let has_lower_bound constraints =
+  let depends_has_lower_bound constraints =
     let rec aux = function
     | Empty -> false
     | Atom (Constraint ((`Gt|`Geq|`Eq), _)) -> true
@@ -27,19 +27,22 @@ let find_mirage lower file version packages =
     in
     aux constraints
   in
-  let has_bound ~lower x = match lower with
-  | false -> has_upper_bound x
-  | true  -> has_lower_bound x
+  let depends_has_bound ~lower x = match lower with
+  | false -> depends_has_upper_bound x
+  | true  -> depends_has_lower_bound x
   in
-  let rec remove_bounds = function
-  | Empty | Atom (Constraint _) -> Empty
-  | Block b -> (match remove_bounds b with Empty -> Empty | b -> Block b)
-  | And (x, y) -> OpamFormula.ands [remove_bounds x; remove_bounds y]
-  | Or (x, y)  -> OpamFormula.ors  [remove_bounds x; remove_bounds y]
-  | Atom (Filter _) as a -> a
+  let remove_depends_bounds constraints =
+    let rec aux = function
+    | Empty | Atom (Constraint _) -> Empty
+    | Block b -> (match aux b with Empty -> Empty | b -> Block b)
+    | And (x, y) -> OpamFormula.ands [aux x; aux y]
+    | Or (x, y)  -> OpamFormula.ors  [aux x; aux y]
+    | Atom (Filter _) as a -> a
+    in
+    aux constraints
   in
-  let add_bound name op constraints =
-    let constraints = remove_bounds constraints in
+  let add_depends_bound name op constraints =
+    let constraints = remove_depends_bounds constraints in
     let atom = Atom (Constraint (op, FString version)) in
     Atom (name, OpamFormula.ands [constraints; atom])
   in
@@ -47,29 +50,39 @@ let find_mirage lower file version packages =
   | false -> `Lt
   | true  -> `Geq
   in
-  let rec ensure_bounds: filtered_formula -> filtered_formula = function
+  let rec ensure_depends_bounds: filtered_formula -> filtered_formula = function
   (* Strings have no constraints on the dependency at all, so the name
      need only match *)
   | Atom (name, Empty) when List.mem name packages ->
-      add_bound name (relop_of_bound lower) Empty
+      add_depends_bound name (relop_of_bound lower) Empty
 
   (* if the name matches, add an upper bound if there isn't one already *)
-  | Atom (name, ops) as l when List.mem name packages && has_bound ~lower ops ->
+  | Atom (name, ops) as l when List.mem name packages
+                            && depends_has_bound ~lower ops ->
       l
   | Atom (name, constraints) when List.mem name packages ->
-      add_bound name (relop_of_bound lower) constraints
+      add_depends_bound name (relop_of_bound lower) constraints
 
   (* leave other nodes alone *)
   | Atom _
   | Empty as f -> f
-  | Block x    -> Block (ensure_bounds x)
-  | And (x, y) -> And (ensure_bounds x, ensure_bounds y)
-  | Or (x, y)  -> Or (ensure_bounds x, ensure_bounds y)
+  | Block x    -> Block (ensure_depends_bounds x)
+  | And (x, y) -> And (ensure_depends_bounds x, ensure_depends_bounds y)
+  | Or (x, y)  -> Or (ensure_depends_bounds x, ensure_depends_bounds y)
+  in
+  let ensure_conflicts_bounds (f:formula): formula =
+    let relop = relop_of_bound (not lower) in
+    let version = Atom (relop, OpamPackage.Version.of_string version) in
+    match f with
+    | Atom (name, _) when List.mem name packages -> Atom (name, version)
+    | a -> a
   in
   let transform_opam opam =
-    let depends = opam.OpamFile.OPAM.depends in
-    let depends = ensure_bounds depends in
-    OpamFile.OPAM.with_depends depends opam
+    let depends   = ensure_depends_bounds opam.OpamFile.OPAM.depends in
+    let conflicts = ensure_conflicts_bounds opam.OpamFile.OPAM.conflicts in
+    opam
+    |> OpamFile.OPAM.with_conflicts conflicts
+    |> OpamFile.OPAM.with_depends depends
   in
   let f = OpamFile.make (OpamFilename.of_string file) in
   let x = OpamFile.OPAM.read f in
