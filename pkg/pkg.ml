@@ -4,7 +4,7 @@
 open Topkg
 
 let () =
-  Pkg.describe "upperbound-constrainer" @@ fun c ->
-  Ok [ 
+  Pkg.describe ~metas:[] "upperbound-constrainer" @@ fun c ->
+  Ok [
        Pkg.bin "src/main" ~dst:"constrain"
   ]

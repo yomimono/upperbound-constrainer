@@ -1,66 +1,94 @@
-open OpamParserTypes
+open OpamTypes
 open Cmdliner
 
 let acted = ref false
 
 let find_mirage lower file version packages =
-  let has_upper_bound constraints =
+  let packages = List.map OpamPackage.Name.of_string packages in
+  let depends_has_upper_bound constraints =
     (* TODO: the actual rules of these constraints are potentially complex;
      * is there a way to evaluate them rather than checking them in text? *)
-    let rec is_upper_bound = function
-    | Logop (_, `And, e, r) -> is_upper_bound e || is_upper_bound r
-    | Prefix_relop (_, `Lt, _) | Prefix_relop (_, `Leq, _) | Prefix_relop (_, `Eq, _) -> true
+    let rec aux = function
+    | Empty -> false
+    | Atom (Constraint ((`Lt|`Leq|`Eq), _))  -> true
+    | Block b -> aux b
+    | And (x, y) | Or (x, y) -> aux x || aux y
     | _ -> false
     in
-    List.exists is_upper_bound constraints
+    aux constraints
   in
-  let has_lower_bound constraints =
-    let rec is_lower_bound = function
-    | Logop (_, `And, e, r) -> is_lower_bound e || is_lower_bound r
-    | Prefix_relop (_, `Gt, _) | Prefix_relop (_, `Geq, _) | Prefix_relop (_, `Eq, _) -> true
+  let depends_has_lower_bound constraints =
+    let rec aux = function
+    | Empty -> false
+    | Atom (Constraint ((`Gt|`Geq|`Eq), _)) -> true
+    | Block b -> aux b
+    | And (x, y) | Or (x, y) -> aux x || aux y
     | _ -> false
     in
-    List.exists is_lower_bound constraints
+    aux constraints
   in
-  let has_bound ~lower x = match lower with
-  | false -> has_upper_bound x
-  | true -> has_lower_bound x
+  let depends_has_bound ~lower x = match lower with
+  | false -> depends_has_upper_bound x
+  | true  -> depends_has_lower_bound x
   in
-  let add_bound (op : relop) = function
-  (* no constraints yet; we're the first one. *)
-  | String (pos, name) ->
-    acted := true;
-    Option (pos, (String (pos, name)),
-      [ Prefix_relop (pos, op, (String (pos, version))) ]
-  )
-  | Option (pos, (String (p, name)), (Prefix_relop (a, b, c))::_) -> acted := true;
-    Option (pos, (String (p, name)), [ Logop (p, `And, Prefix_relop (a, b, c),
-      Prefix_relop (pos, op, (String (pos, version)))
-    )]
-    )
-  | other -> other
+  let remove_depends_bounds constraints =
+    let rec aux = function
+    | Empty | Atom (Constraint _) -> Empty
+    | Block b -> (match aux b with Empty -> Empty | b -> Block b)
+    | And (x, y) -> OpamFormula.ands [aux x; aux y]
+    | Or (x, y)  -> OpamFormula.ors  [aux x; aux y]
+    | Atom (Filter _) as a -> a
+    in
+    aux constraints
+  in
+  let add_depends_bound name op constraints =
+    let constraints = remove_depends_bounds constraints in
+    let atom = Atom (Constraint (op, FString version)) in
+    Atom (name, OpamFormula.ands [constraints; atom])
   in
   let relop_of_bound = function
   | false -> `Lt
-  | true -> `Geq
+  | true  -> `Geq
   in
-  let ensure_bounds ~strs = function
-  (* Strings have no constraints on the dependency at all, so the name need only match *)
-  | String (_, name) as l when List.mem name strs -> add_bound (relop_of_bound lower) l
+  let rec ensure_depends_bounds: filtered_formula -> filtered_formula = function
+  (* Strings have no constraints on the dependency at all, so the name
+     need only match *)
+  | Atom (name, Empty) when List.mem name packages ->
+      add_depends_bound name (relop_of_bound lower) Empty
+
   (* if the name matches, add an upper bound if there isn't one already *)
-  | Option (_, String (_pos, name), ops) as l when List.mem name strs && has_bound ~lower ops -> l
-  | Option (_, String (_pos, name), ops) as l when List.mem name strs -> add_bound (relop_of_bound lower) l
+  | Atom (name, ops) as l when List.mem name packages
+                            && depends_has_bound ~lower ops ->
+      l
+  | Atom (name, constraints) when List.mem name packages ->
+      add_depends_bound name (relop_of_bound lower) constraints
+
   (* leave other nodes alone *)
-  | other -> other
+  | Atom _
+  | Empty as f -> f
+  | Block x    -> Block (ensure_depends_bounds x)
+  | And (x, y) -> And (ensure_depends_bounds x, ensure_depends_bounds y)
+  | Or (x, y)  -> Or (ensure_depends_bounds x, ensure_depends_bounds y)
   in
-  let transform_dependencies = function
-  | Variable (name, "depends", List (pos, deps)) ->
-     Variable (name, "depends", List (pos, List.map (ensure_bounds ~strs:packages) deps))
-  (* don't bother acting on anything other than the list of dependencies *)
-  | other -> other
+  let ensure_conflicts_bounds (f:formula): formula =
+    let relop = relop_of_bound (not lower) in
+    let version = Atom (relop, OpamPackage.Version.of_string version) in
+    match f with
+    | Atom (name, _) when List.mem name packages -> Atom (name, version)
+    | a -> a
   in
-  let l = (OpamParser.file file).file_contents in
-  { file_name = file; file_contents = (List.map transform_dependencies l)}
+  let transform_opam opam =
+    let depends   = ensure_depends_bounds opam.OpamFile.OPAM.depends in
+    let conflicts = ensure_conflicts_bounds opam.OpamFile.OPAM.conflicts in
+    opam
+    |> OpamFile.OPAM.with_conflicts conflicts
+    |> OpamFile.OPAM.with_depends depends
+  in
+  let f = OpamFile.make (OpamFilename.of_string file) in
+  let x = OpamFile.OPAM.read f in
+  let y = transform_opam x in
+  if x = y then ()
+  else OpamFile.OPAM.write_with_preserved_format f y
 
 let file =
   let doc = "The OPAM file to add dependency version constraints to." in
@@ -86,17 +114,5 @@ let info =
 let () =
   let find_t = Term.(const find_mirage $ lower $ file $ version_number $ packages) in
   match Term.eval (find_t, info) with
-  | `Ok file -> begin
-    match !acted with
-    | true ->
-      (* overwrite previous contents *)
-      let fd = Unix.(openfile file.file_name [O_WRONLY; O_TRUNC] 0o755) in
-      let ch = Unix.out_channel_of_descr fd in
-      set_binary_mode_out ch false;
-      let fmt = Format.formatter_of_out_channel ch in
-      Format.(fprintf fmt "%s\n" @@ OpamPrinter.opamfile file);
-      flush ch;
-      Unix.close fd
-    | false -> exit 1
-  end
+  | `Ok () -> ()
   | _ -> exit 1

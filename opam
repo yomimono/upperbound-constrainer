@@ -11,6 +11,6 @@ build: ["ocaml" "pkg/pkg.ml" "build" "--pinned" "%{pinned}%" ]
 depends: [
   "ocamlfind" {build}
   "ocamlbuild" {build}
-  "opam-file-format"
+  "opam-format"
   "cmdliner"
 ]
