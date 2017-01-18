@@ -6,5 +6,6 @@ open Topkg
 let () =
   Pkg.describe ~metas:[] "upperbound-constrainer" @@ fun c ->
   Ok [
-       Pkg.bin "src/main" ~dst:"constrain"
+          Pkg.bin "src/main" ~dst:"constrain";
+       Pkg.bin "src/packages" ~dst:"mirageos3"
   ]
